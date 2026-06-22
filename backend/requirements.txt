@@ -1,0 +1,16 @@
+fastapi
+uvicorn
+sqlalchemy
+psycopg2-binary
+python-multipart
+pymupdf
+pypdf
+langchain
+langchain-community
+langgraph
+langchain-groq
+chromadb
+sentence-transformers
+langdetect
+python-dotenv
+langchain_text_splitters

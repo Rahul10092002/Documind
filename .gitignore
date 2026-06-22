@@ -1,0 +1,10 @@
+# Root gitignore
+.env
+.venv/
+venv/
+__pycache__/
+*.pyc
+
+# IDEs
+.vscode/
+.idea/
