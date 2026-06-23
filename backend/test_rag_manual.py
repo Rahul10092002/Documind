@@ -20,10 +20,14 @@ def run_rag_test(doc_id: int, filename: str, tests: list[dict]):
         print(f"\nQuery {idx}: '{test['question']}'")
         print("Retrieving context and generating answer...")
         try:
-            answer = answer_question(document_id=doc_id, question=test["question"])
+            rag_response = answer_question(document_id=doc_id, question=test["question"])
+            answer = rag_response["answer"]
             print("-" * 65)
             print("ANSWER:")
             print(answer)
+            print(f"Confidence: {rag_response['confidence']}")
+            print(f"Chunks Used: {rag_response['chunks_used']}")
+            print(f"Sources: {rag_response['sources']}")
             print("-" * 65)
 
             # Assert expected keywords are in the generated answer

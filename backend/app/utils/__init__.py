@@ -8,3 +8,7 @@ from .vector_store import (  # noqa: F401
 from .pdf_extraction import extract_text_from_pdf  # noqa: F401
 from .language_detection import detect_language  # noqa: F401
 from .rag import answer_question  # noqa: F401
+from .regex_parser import extract_entities_via_regex  # noqa: F401
+from .entity_extraction import run_full_entity_extraction  # noqa: F401
+
+

@@ -14,7 +14,23 @@ logger = logging.getLogger(__name__)
 
 DATABASE_URL = os.getenv("DATABASE_URL")
 
-engine = create_engine(DATABASE_URL)
+try:
+    if not DATABASE_URL:
+        raise ValueError("DATABASE_URL is not set.")
+    engine = create_engine(DATABASE_URL)
+    # Trigger a connection attempt immediately to verify availability
+    with engine.connect() as conn:
+        conn.execute(text("SELECT 1"))
+    logger.info("Connected to primary database successfully.")
+except (OperationalError, Exception) as e:
+    logger.warning(
+        "Could not connect to database at '%s'. Falling back to local SQLite database 'documind.db'. Error: %s",
+        DATABASE_URL,
+        e
+    )
+    sqlite_path = os.path.join(backend_dir, "documind.db")
+    sqlite_url = f"sqlite:///{sqlite_path}"
+    engine = create_engine(sqlite_url, connect_args={"check_same_thread": False})
 
 SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
 

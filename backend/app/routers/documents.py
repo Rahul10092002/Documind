@@ -7,15 +7,18 @@ from fastapi import APIRouter, Depends, File, HTTPException, UploadFile, status
 from sqlalchemy.orm import Session
 
 from app.database import get_db
-from app.models import Document, DocumentStatus, ChatMessage, MessageRole
-from app.schemas import DocumentOut, ChatRequest, ChatResponse
+from app.models import Document, DocumentStatus, ChatMessage, MessageRole, AnalysisResult
+from app.schemas import DocumentOut, ChatRequest, ChatResponse, AnalysisResultOut
 from app.utils import (
     split_text,
     add_document_chunks,
     extract_text_from_pdf,
     detect_language,
     answer_question,
+    extract_entities_via_regex,
+    run_full_entity_extraction,
 )
+
 logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/documents", tags=["documents"])
@@ -100,11 +103,22 @@ async def upload_document(
         # Index chunks in ChromaDB
         add_document_chunks(document_id=doc.id, chunks=chunks, filename=doc.filename)
         
+        # Run full analysis and create AnalysisResult
+        logger.info("Running full entity extraction for document id=%d", doc.id)
+        entities = run_full_entity_extraction(raw_text, language=language)
+        analysis = AnalysisResult(
+            document_id=doc.id,
+            extracted_entities=entities,
+            risk_flags=[],
+            draft_text=""
+        )
+        db.add(analysis)
+        
         # Update status to completed
         doc.status = DocumentStatus.completed
         db.commit()
         db.refresh(doc)
-        logger.info("Successfully indexed document id=%d and set status to completed", doc.id)
+        logger.info("Successfully indexed and analyzed document id=%d and set status to completed", doc.id)
     except Exception as exc:
         logger.error("Failed to process/index document id=%d: %s", doc.id, exc)
         doc.status = DocumentStatus.failed
@@ -148,7 +162,7 @@ def chat_with_document(
 
     # 2. Get answer from RAG pipeline
     try:
-        answer = answer_question(document_id=document_id, question=payload.question)
+        rag_response = answer_question(document_id=document_id, question=payload.question)
     except Exception as exc:
         logger.error("RAG pipeline failed for document_id=%d: %s", document_id, exc)
         raise HTTPException(
@@ -166,7 +180,7 @@ def chat_with_document(
         assistant_msg = ChatMessage(
             document_id=document_id,
             role=MessageRole.assistant,
-            content=answer
+            content=rag_response["answer"]
         )
         db.add(user_msg)
         db.add(assistant_msg)
@@ -175,4 +189,91 @@ def chat_with_document(
     except Exception as exc:
         logger.error("Failed to save chat exchange to database: %s", exc)
 
-    return ChatResponse(answer=answer)
+    return ChatResponse(
+        answer=rag_response["answer"],
+        document_id=rag_response["document_id"],
+        chunks_used=rag_response["chunks_used"],
+        confidence=rag_response["confidence"],
+        sources=rag_response["sources"]
+    )
+
+
+@router.post(
+    "/{document_id}/analyze",
+    response_model=AnalysisResultOut,
+    status_code=status.HTTP_200_OK,
+    summary="Run full analysis on a document",
+    description="Runs/reruns the full (regex + LLM) pass on the document's raw text and returns/updates the extraction results.",
+)
+def analyze_document(
+    document_id: int,
+    db: Session = Depends(get_db),
+) -> AnalysisResultOut:
+    doc = db.query(Document).filter(Document.id == document_id).first()
+    if not doc:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"Document with ID {document_id} was not found."
+        )
+
+    logger.info("Running manual analyze request for document id=%d", document_id)
+    
+    # Normalizing existing raw text if it contains visual-order Devanagari characters or double spaces
+    from app.utils.pdf_extraction import normalize_devanagari_text
+    raw_text = doc.raw_text or ""
+    normalized_text = normalize_devanagari_text(raw_text)
+    if normalized_text != raw_text:
+        logger.info("Normalizing and re-indexing raw text for document id=%d", document_id)
+        doc.raw_text = normalized_text
+        db.commit()
+        db.refresh(doc)
+        
+        # Re-index chunks in ChromaDB
+        from app.utils import delete_document_chunks, split_text, add_document_chunks
+        try:
+            delete_document_chunks(doc.id)
+            chunks = split_text(normalized_text)
+            add_document_chunks(document_id=doc.id, chunks=chunks, filename=doc.filename)
+        except Exception as exc:
+            logger.error("Failed to re-index normalized chunks for document id=%d: %s", document_id, exc)
+
+    # pyrefly: ignore [bad-argument-type]
+    entities = run_full_entity_extraction(doc.raw_text or "", language=doc.language)
+
+    analysis = db.query(AnalysisResult).filter(AnalysisResult.document_id == document_id).first()
+    if not analysis:
+        analysis = AnalysisResult(
+            document_id=document_id,
+            extracted_entities=entities,
+            risk_flags=[],
+            draft_text=""
+        )
+        db.add(analysis)
+    else:
+        analysis.extracted_entities = entities
+
+    db.commit()
+    db.refresh(analysis)
+    return analysis
+
+
+
+@router.get(
+    "/{document_id}/analysis",
+    response_model=AnalysisResultOut,
+    status_code=status.HTTP_200_OK,
+    summary="Get existing analysis results",
+    description="Retrieves the saved analysis result (extracted entities, risk flags, draft reply) for a document.",
+)
+def get_document_analysis(
+    document_id: int,
+    db: Session = Depends(get_db),
+) -> AnalysisResultOut:
+    analysis = db.query(AnalysisResult).filter(AnalysisResult.document_id == document_id).first()
+    if not analysis:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"No analysis found for document with ID {document_id}. Run analyze first."
+        )
+    return analysis
+

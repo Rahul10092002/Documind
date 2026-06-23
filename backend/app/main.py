@@ -17,6 +17,7 @@ from app.routers import documents
 from app.utils import get_collection
 
 app = FastAPI(title="DocuMind API")
+main = app
 logger = logging.getLogger(__name__)
 
 # ── Routers ──────────────────────────────────────────────────────────────────

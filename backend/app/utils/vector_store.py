@@ -3,6 +3,8 @@ import os
 from dotenv import load_dotenv
 import chromadb
 from chromadb.utils import embedding_functions
+from langchain_community.vectorstores import Chroma
+from langchain_core.embeddings import Embeddings
 
 # Resolve absolute path to ensure database is created and dotenv is loaded in the correct backend workspace directory
 backend_dir = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", ".."))
@@ -100,3 +102,34 @@ def delete_document_chunks(document_id: int) -> None:
     except Exception as e:
         logger.error("Failed to delete chunks for document_id=%d from ChromaDB: %s", document_id, e)
         raise
+
+
+class ChromaEmbeddingWrapper(Embeddings):
+    """Wraps Chroma's custom SentenceTransformerEmbeddingFunction into a LangChain Embeddings-compatible interface."""
+    def __init__(self, chroma_embedding_fn):
+        self.fn = chroma_embedding_fn
+
+    def embed_documents(self, texts: list[str]) -> list[list[float]]:
+        return self.fn(texts)
+
+    def embed_query(self, text: str) -> list[float]:
+        return self.fn([text])[0]
+
+
+_vector_store = None
+
+
+def get_vector_store() -> Chroma:
+    """Returns a cached LangChain Chroma vector store instance, reusing the persistent client."""
+    global _vector_store
+    if _vector_store is None:
+        # get_collection() ensures both collection and _embedding_function are initialized
+        get_collection()
+        embeddings = ChromaEmbeddingWrapper(_embedding_function)
+        _vector_store = Chroma(
+            client=chroma_client,
+            collection_name=CHROMA_COLLECTION_NAME,
+            embedding_function=embeddings
+        )
+    return _vector_store
+
