@@ -3,6 +3,7 @@ from typing import List, Optional
 try:
     # pyrefly: ignore [missing-import]
     from langchain_text_splitters import RecursiveCharacterTextSplitter
+    from langchain_core.documents import Document
 except Exception as e:
     raise ImportError(
         "langchain is required for text chunking. Install with 'pip install langchain_text_splitters'"
@@ -42,3 +43,36 @@ def split_text(
 
     # RecursiveCharacterTextSplitter provides split_text
     return splitter.split_text(text)
+
+
+def split_documents(
+    documents: List[Document],
+    chunk_size: int = 700,
+    chunk_overlap: int = 100,
+    separators: Optional[List[str]] = None,
+) -> List[Document]:
+    """Split list of Document objects into chunked Document objects, preserving page metadata.
+
+    Args:
+        documents: List of Document objects to chunk.
+        chunk_size: Maximum characters per chunk (default 700).
+        chunk_overlap: Number of characters overlap between chunks (default 100).
+        separators: Optional list of separators to prefer when splitting.
+
+    Returns:
+        A list of chunked Document objects.
+    """
+    if not documents:
+        return []
+
+    if separators is None:
+        separators = ["\n\n", "\n", " ", ""]
+
+    splitter = RecursiveCharacterTextSplitter(
+        chunk_size=chunk_size,
+        chunk_overlap=chunk_overlap,
+        separators=separators,
+    )
+
+    return splitter.split_documents(documents)
+

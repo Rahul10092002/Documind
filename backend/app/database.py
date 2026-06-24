@@ -1,18 +1,16 @@
 import logging
 import os
 
-from dotenv import load_dotenv
 from sqlalchemy import create_engine, text 
 from sqlalchemy.exc import OperationalError
 from sqlalchemy.orm import declarative_base, sessionmaker
 
-backend_dir = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
-dotenv_path = os.path.join(backend_dir, ".env")
-load_dotenv(dotenv_path=dotenv_path)
+from app.config import settings
 
 logger = logging.getLogger(__name__)
 
-DATABASE_URL = os.getenv("DATABASE_URL")
+DATABASE_URL = settings.database_url
+backend_dir = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
 
 try:
     if not DATABASE_URL:

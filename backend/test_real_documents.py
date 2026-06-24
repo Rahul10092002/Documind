@@ -1,13 +1,12 @@
 import os
 import sys
 from pathlib import Path
-from dotenv import load_dotenv
 
 # Ensure the backend directory is in python path
 backend_dir = os.path.dirname(os.path.abspath(__file__))
 sys.path.append(backend_dir)
 
-load_dotenv()
+from app.config import settings
 
 from app.utils.pdf_extraction import extract_text_from_pdf
 from app.utils.entity_extraction import run_full_entity_extraction

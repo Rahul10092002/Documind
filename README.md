@@ -130,7 +130,7 @@ documind/
 │   ├── api/
 │   │   └── routes/
 │   │       ├── upload.py            # POST /upload — PDF ingest
-│   │       ├── analyze.py           # POST /analyze — full LangGraph pipeline
+│   │       ├── analyze.py           # PUT /analysis — full LangGraph pipeline
 │   │       └── chat.py              # POST /chat — RAG Q&A
 │   ├── agents/
 │   │   ├── pipeline.py              # LangGraph StateGraph definition
@@ -182,7 +182,7 @@ CREATE TABLE documents (
     upload_date TIMESTAMP DEFAULT NOW(),
     language    TEXT,                  -- detected: hindi / english / hinglish
     raw_text    TEXT,
-    status      TEXT DEFAULT 'pending' -- pending / processed / failed
+    status      TEXT DEFAULT 'pending' -- pending / processing / completed / failed
 );
 
 -- Analysis output per document
@@ -205,6 +205,10 @@ CREATE TABLE chat_messages (
 ```
 
 > **Design note:** `extracted_entities` and `risk_flags` are stored as single JSON columns rather than normalized tables. This keeps queries simple and is appropriate for a project of this scope.
+
+### ⚠️ Known Limitations
+
+1. **Document Text Truncation:** To keep prompt contexts within reliable processing ranges, only the **first 30,000 characters** of the extracted raw text are sent to the LLM for risk flags and draft reply generation. Any contract clauses or text beyond the first 30,000 characters will not be risk-scanned or drafted. RAG-based chat queries still have access to the full document chunks indexed in ChromaDB.
 
 ---
 
@@ -314,14 +318,15 @@ curl -X POST http://localhost:8000/upload \
 
 ---
 
-### `POST /analyze`
-Run the full LangGraph pipeline on an uploaded document. Returns extraction + risk flags + draft reply.
+### `PUT /documents/{document_id}/analysis`
+Runs or re-runs (idempotent upsert) the full analysis (regex + LLM passes) on an uploaded document and returns/updates the extraction results.
 
 ```bash
-curl -X POST http://localhost:8000/analyze \
-  -H "Content-Type: application/json" \
-  -d '{"document_id": 1}'
+curl -X PUT http://localhost:8000/documents/1/analysis
 ```
+
+> [!NOTE]
+> The previous endpoint `POST /documents/{document_id}/analyze` is now deprecated. It remains supported for backward compatibility, but developers are encouraged to use `PUT /documents/{document_id}/analysis` to match RESTful idempotency and update semantics.
 
 ```json
 {

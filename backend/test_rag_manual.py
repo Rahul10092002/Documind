@@ -1,14 +1,11 @@
 import os
 import sys
-from dotenv import load_dotenv
 
 # Ensure the backend directory is in python path
 sys.path.append(os.path.dirname(os.path.abspath(__file__)))
 
-# Load environment variables
-load_dotenv()
-
-from app.utils.rag import answer_question
+from app.config import settings
+from app.utils.answer_service import answer_question
 
 
 def run_rag_test(doc_id: int, filename: str, tests: list[dict]):
@@ -53,7 +50,7 @@ def main():
     print("Starting Manual Verification on Uploaded Documents (Doc 10 & Doc 11)...")
 
     # Ensure GROQ_API_KEY is configured
-    if not os.getenv("GROQ_API_KEY"):
+    if not settings.groq_api_key:
         print("[ERROR]: GROQ_API_KEY is not configured in the environment.")
         return
 

@@ -14,3 +14,4 @@ sentence-transformers
 langdetect
 python-dotenv
 langchain_text_splitters
+langchain-google-genai

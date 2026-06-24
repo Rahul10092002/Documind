@@ -70,27 +70,32 @@ def extract_text_from_pdf(pdf_path: Union[str, Path], language_hint: Optional[st
     Returns:
         Normalized text string ready for downstream processing.
     """
-    print("DEBUG _PYMUPDF_AVAILABLE =", _PYMUPDF_AVAILABLE)  # add karo
-    print("DEBUG fitz imported =", _PYMUPDF_AVAILABLE)
     path = Path(pdf_path)
     if not path.exists():
         raise FileNotFoundError(f"PDF not found: {pdf_path}")
     
-    if _PYMUPDF_AVAILABLE:
-        doc = fitz.open(pdf_path)
-        pages_text = [page.get_text() for page in doc]
-        doc.close()
-        return normalize_devanagari("\n".join(pages_text))
-    else:
-        # pdfplumber fallback
-        import pdfplumber
-        pages_text = []
-        with pdfplumber.open(pdf_path) as pdf:
-            for page in pdf.pages:
-                t = page.extract_text()
-                if t:
-                    pages_text.append(t)
-        return normalize_devanagari("\n".join(pages_text))
+    try:
+        from langchain_community.document_loaders import PyMuPDFLoader
+        loader = PyMuPDFLoader(str(pdf_path))
+        docs = loader.load()
+        return normalize_devanagari("\n".join([d.page_content for d in docs]))
+    except Exception as exc:
+        logger.warning("PyMuPDFLoader failed: %s, attempting fallback...", exc)
+        if _PYMUPDF_AVAILABLE:
+            doc = fitz.open(pdf_path)
+            pages_text = [page.get_text() for page in doc]
+            doc.close()
+            return normalize_devanagari("\n".join(pages_text))
+        else:
+            # pdfplumber fallback
+            import pdfplumber
+            pages_text = []
+            with pdfplumber.open(pdf_path) as pdf:
+                for page in pdf.pages:
+                    t = page.extract_text()
+                    if t:
+                        pages_text.append(t)
+            return normalize_devanagari("\n".join(pages_text))
 
 
 # ─── Quick verification helper ──────────────────────────────────────────────

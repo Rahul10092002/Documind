@@ -1,26 +1,16 @@
 import logging
 import os
-from dotenv import load_dotenv
 import chromadb
 from chromadb.utils import embedding_functions
 from langchain_community.vectorstores import Chroma
 from langchain_core.embeddings import Embeddings
-
-# Resolve absolute path to ensure database is created and dotenv is loaded in the correct backend workspace directory
-backend_dir = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", ".."))
-dotenv_path = os.path.join(backend_dir, ".env")
-load_dotenv(dotenv_path=dotenv_path)
+from app.config import settings
 
 logger = logging.getLogger(__name__)
 
-# Configure ChromaDB Settings
-CHROMA_PATH = os.getenv("CHROMA_PATH", "chroma_db")
-CHROMA_COLLECTION_NAME = os.getenv("CHROMA_COLLECTION_NAME", "documents")
-EMBEDDING_MODEL_NAME = os.getenv("EMBEDDING_MODEL_NAME", "all-MiniLM-L6-v2")
-
 # Resolve absolute path to ensure database is created in the correct backend workspace directory
 backend_dir = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", ".."))
-chroma_dir = os.path.join(backend_dir, CHROMA_PATH)
+chroma_dir = os.path.join(backend_dir, settings.chroma_path)
 
 logger.info("Initializing ChromaDB PersistentClient at path: %s", chroma_dir)
 
@@ -38,58 +28,81 @@ def get_collection():
     global _embedding_function
     if _embedding_function is None:
         try:
-            logger.info("Initializing SentenceTransformerEmbeddingFunction with model: %s", EMBEDDING_MODEL_NAME)
+            logger.info("Initializing SentenceTransformerEmbeddingFunction with model: %s", settings.embedding_model_name)
             _embedding_function = embedding_functions.SentenceTransformerEmbeddingFunction(
-                model_name=EMBEDDING_MODEL_NAME
+                model_name=settings.embedding_model_name
             )
         except Exception as e:
-            logger.error("Failed to initialize SentenceTransformerEmbeddingFunction with model %s: %s", EMBEDDING_MODEL_NAME, e)
+            logger.error("Failed to initialize SentenceTransformerEmbeddingFunction with model %s: %s", settings.embedding_model_name, e)
             raise
 
     try:
         collection = chroma_client.get_or_create_collection(
-            name=CHROMA_COLLECTION_NAME,
+            name=settings.chroma_collection_name,
             embedding_function=_embedding_function
         )
         return collection
     except Exception as e:
-        logger.error("Failed to get or create ChromaDB collection '%s': %s", CHROMA_COLLECTION_NAME, e)
+        logger.error("Failed to get or create ChromaDB collection '%s': %s", settings.chroma_collection_name, e)
         raise
 
 
-def add_document_chunks(document_id: int, chunks: list[str], filename: str) -> None:
+def add_document_chunks(document_id: str, chunks: list, filename: str) -> None:
     """Indexes document text chunks in ChromaDB.
 
     Args:
         document_id: The ID of the document in the primary database.
-        chunks: List of text strings to index.
+        chunks: List of text strings or Document objects to index.
         filename: Name of the original document.
     """
     if not chunks:
-        logger.warning("No chunks provided to index for document_id: %d", document_id)
+        logger.warning("No chunks provided to index for document_id: %s", document_id)
         return
 
     collection = get_collection()
 
     ids = [f"{document_id}_chunk_{i}" for i in range(len(chunks))]
-    metadatas = [
-        {"document_id": document_id, "filename": filename, "chunk_index": i}
-        for i in range(len(chunks))
-    ]
+    documents_to_add = []
+    metadatas_to_add = []
+
+    for i, chunk in enumerate(chunks):
+        if isinstance(chunk, str):
+            documents_to_add.append(chunk)
+            metadatas_to_add.append({
+                "document_id": document_id,
+                "filename": filename,
+                "chunk_index": i
+            })
+        else:
+            # It's a LangChain Document object
+            documents_to_add.append(chunk.page_content)
+            meta = {
+                "document_id": document_id,
+                "filename": filename,
+                "chunk_index": i
+            }
+            # PyMuPDFLoader uses 0-based page number. Convert to 1-based for the user.
+            if "page" in chunk.metadata:
+                meta["page"] = chunk.metadata["page"] + 1
+            # Copy other metadata fields if present, avoiding overrides of core keys
+            for k, v in chunk.metadata.items():
+                if k not in meta and k != "source":
+                    meta[k] = v
+            metadatas_to_add.append(meta)
 
     try:
         collection.add(
-            documents=chunks,
-            metadatas=metadatas,
+            documents=documents_to_add,
+            metadatas=metadatas_to_add,
             ids=ids
         )
-        logger.info("Indexed %d chunks for document_id=%d in ChromaDB.", len(chunks), document_id)
+        logger.info("Indexed %d chunks for document_id=%s in ChromaDB.", len(chunks), document_id)
     except Exception as e:
-        logger.error("Failed to index chunks for document_id=%d in ChromaDB: %s", document_id, e)
+        logger.error("Failed to index chunks for document_id=%s in ChromaDB: %s", document_id, e)
         raise
 
 
-def delete_document_chunks(document_id: int) -> None:
+def delete_document_chunks(document_id: str) -> None:
     """Deletes all chunks belonging to a document from ChromaDB.
 
     Args:
@@ -98,9 +111,9 @@ def delete_document_chunks(document_id: int) -> None:
     collection = get_collection()
     try:
         collection.delete(where={"document_id": document_id})
-        logger.info("Deleted chunks for document_id=%d from ChromaDB.", document_id)
+        logger.info("Deleted chunks for document_id=%s from ChromaDB.", document_id)
     except Exception as e:
-        logger.error("Failed to delete chunks for document_id=%d from ChromaDB: %s", document_id, e)
+        logger.error("Failed to delete chunks for document_id=%s from ChromaDB: %s", document_id, e)
         raise
 
 
@@ -128,7 +141,7 @@ def get_vector_store() -> Chroma:
         embeddings = ChromaEmbeddingWrapper(_embedding_function)
         _vector_store = Chroma(
             client=chroma_client,
-            collection_name=CHROMA_COLLECTION_NAME,
+            collection_name=settings.chroma_collection_name,
             embedding_function=embeddings
         )
     return _vector_store

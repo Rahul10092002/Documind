@@ -1,4 +1,5 @@
 import enum
+import uuid
 from datetime import datetime, timezone
 
 from sqlalchemy import (
@@ -22,7 +23,15 @@ from app.database import Base
 # ---------------------------------------------------------------------------
 
 class DocumentStatus(str, enum.Enum):
-    """Lifecycle states for an uploaded document."""
+    """Lifecycle states for an uploaded document.
+
+    States:
+        pending: Reserved for future asynchronous task queue architectures (e.g. background
+                 processing workers) when a document is uploaded but processing has not yet begun.
+        processing: The document text is currently being extracted, chunked, and analyzed.
+        completed: The document has been successfully indexed and analyzed.
+        failed: The document processing or indexing failed.
+    """
     pending = "pending"
     processing = "processing"
     completed = "completed"
@@ -44,8 +53,12 @@ class Document(Base):
 
     __tablename__ = "documents"
 
-    id = Column(Integer, primary_key=True, index=True)
+    id = Column(String(36), primary_key=True, default=lambda: str(uuid.uuid4()), index=True)
     filename = Column(String(255), nullable=False)
+    # Exact path to the uploaded PDF on disk. Stored at upload time so file
+    # lookup is O(1) and never ambiguous (no fuzzy mtime matching required).
+    # Nullable for backwards compatibility with rows created before this column existed.
+    file_path = Column(String(512), nullable=True)
     upload_date = Column(
         DateTime(timezone=True),
         nullable=False,
@@ -84,7 +97,7 @@ class AnalysisResult(Base):
 
     id = Column(Integer, primary_key=True, index=True)
     document_id = Column(
-        Integer,
+        String(36),
         ForeignKey("documents.id", ondelete="CASCADE"),
         nullable=False,
         unique=True,            # enforces one-to-one at the DB level
@@ -92,7 +105,7 @@ class AnalysisResult(Base):
     )
     extracted_entities = Column(JSON, nullable=True)    # e.g. [{"type": "ORG", "text": "Acme"}]
     risk_flags = Column(JSON, nullable=True)            # e.g. [{"level": "high", "reason": "..."}]
-    draft_text = Column(Text, nullable=True)
+    risk_obligation_summary = Column(Text, nullable=True)
 
     # Relationship
     document = relationship("Document", back_populates="analysis_result")
@@ -108,7 +121,7 @@ class ChatMessage(Base):
 
     id = Column(Integer, primary_key=True, index=True)
     document_id = Column(
-        Integer,
+        String(36),
         ForeignKey("documents.id", ondelete="CASCADE"),
         nullable=False,
         index=True,

@@ -15,32 +15,32 @@ def test_full_entity_extraction_mocked():
         "The rent is ₹12,000 per month, payable by the 5th of each month. The Tenant must keep the premises clean."
     )
     
-    mock_response = MagicMock()
-    # Mock return content matching standard LLM output format
-    mock_response.content = """
-    {
-      "dates": ["15/08/2025", "5th of each month"],
-      "amounts": ["₹12,000"],
-      "parties": ["Ram Kumar", "Shyam Lal"],
-      "obligations": ["Tenant must keep the premises clean"]
-    }
-    """
-    
-    with patch("app.utils.entity_extraction.get_llm") as mock_get_llm:
-        mock_llm_instance = MagicMock()
-        mock_llm_instance.invoke.return_value = mock_response
-        mock_get_llm.return_value = mock_llm_instance
+    with patch("app.utils.entity_extraction.default_llm_client.get_structured_llm") as mock_get_structured_llm:
+        mock_runnable = MagicMock()
+        mock_get_structured_llm.return_value = mock_runnable
+        
+        from app.utils.entity_extraction import ExtractedEntities
+        mock_data = ExtractedEntities(
+            parties=["Ram Kumar", "Shyam Lal"],
+            dates=["15/08/2025", "5th of each month"],
+            amounts=["₹12,000"],
+            obligations=["Tenant must keep the premises clean"],
+            suggested_questions=["What is the rent amount?", "When is the rent due?"]
+        )
+        mock_runnable.invoke.return_value = mock_data
+        mock_runnable.return_value = mock_data
         
         result = run_full_entity_extraction(test_text)
         
         # Verify JSON shape
         assert isinstance(result, dict)
-        assert set(result.keys()) == {"dates", "amounts", "parties", "obligations"}
+        assert set(result.keys()) == {"dates", "amounts", "parties", "obligations", "suggested_questions"}
         
         assert isinstance(result["dates"], list)
         assert isinstance(result["amounts"], list)
         assert isinstance(result["parties"], list)
         assert isinstance(result["obligations"], list)
+        assert isinstance(result["suggested_questions"], list)
         
         # Verify correctness of extracted and merged values
         assert "15/08/2025" in result["dates"]
@@ -68,11 +68,12 @@ def test_full_entity_extraction_real():
     
     # Assert JSON shape
     assert isinstance(result, dict)
-    assert set(result.keys()) == {"dates", "amounts", "parties", "obligations"}
+    assert set(result.keys()) == {"dates", "amounts", "parties", "obligations", "suggested_questions"}
     assert isinstance(result["dates"], list)
     assert isinstance(result["amounts"], list)
     assert isinstance(result["parties"], list)
     assert isinstance(result["obligations"], list)
+    assert isinstance(result["suggested_questions"], list)
     
     # Regex pass checks
     assert any("25,000" in c for c in result["amounts"])
