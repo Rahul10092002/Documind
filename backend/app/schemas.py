@@ -15,6 +15,7 @@ class DocumentOut(BaseModel):
     upload_date: datetime
     language: Optional[str]
     status: DocumentStatus
+    detailed_status: Optional[str] = None
     raw_text: Optional[str] = None
 
     model_config = {"from_attributes": True}
@@ -28,6 +29,7 @@ class DocumentSummaryOut(BaseModel):
     upload_date: datetime
     language: Optional[str]
     status: DocumentStatus
+    detailed_status: Optional[str] = None
 
     model_config = {"from_attributes": True}
 

@@ -21,6 +21,7 @@ from app.utils.llm_client import LLMClientInterface, default_llm_client
 from app.utils.vector_retriever import VectorStoreInterface, default_vector_retriever
 from app.utils.prompt_templates import get_qa_prompt, get_risk_analysis_prompt, get_rephrase_prompt, get_followup_questions_prompt
 from app.utils.vector_store import get_vector_store
+from app.utils.entity_extraction import clean_boilerplate
 
 logger = logging.getLogger(__name__)
 
@@ -105,6 +106,7 @@ class ScoredChromaRetriever(BaseRetriever):
     k: int
     document_id: str
     distance_threshold: float
+    on_step: Any = None
 
     def _get_relevant_documents(self, query: str) -> List[LCDocument]:
         results = self.vector_store.similarity_search_with_score(
@@ -120,6 +122,9 @@ class ScoredChromaRetriever(BaseRetriever):
         return docs
 
     async def _aget_relevant_documents(self, query: str) -> List[LCDocument]:
+        on_step = getattr(self, "on_step", None)
+        if on_step:
+            await on_step("Searching document sections...")
         results = await self.vector_store.asimilarity_search_with_score(
             query=query,
             k=self.k,
@@ -343,7 +348,8 @@ async def aanswer_question(
     k: int = 4,
     vector_retriever: VectorStoreInterface = default_vector_retriever,
     llm_client: LLMClientInterface = default_llm_client,
-    db: Session = None
+    db: Session = None,
+    on_step = None
 ) -> dict:
     """Answers a question about a specific document asynchronously by retrieving relevant chunks
     from ChromaDB and generating an answer via Groq/Gemini LLM.
@@ -365,6 +371,7 @@ async def aanswer_question(
             document_id=str(document_id),
             distance_threshold=settings.chroma_distance_threshold
         )
+        retriever.on_step = on_step
 
         llm = llm_client.get_resilient_llm()
         response_lang = get_document_language(document_id)
@@ -374,6 +381,8 @@ async def aanswer_question(
         rephrase_chain = rephrase_prompt | llm | StrOutputParser()
 
         async def aget_search_query(x):
+            if on_step:
+                await on_step("Refining search query...")
             if not x.get("chat_history"):
                 return x["input"]
             return await rephrase_chain.ainvoke(x)
@@ -391,14 +400,24 @@ async def aanswer_question(
             chat_history=itemgetter("chat_history"),
         )
 
+        async def aformat_docs_with_step(docs):
+            if on_step:
+                await on_step("Reading referenced sections...")
+            return format_docs(docs)
+
+        async def agenerate_response_with_step(prompt_val):
+            if on_step:
+                await on_step("Generating final response...")
+            return await llm.ainvoke(prompt_val)
+
         generate = (
             {
-                "context": itemgetter("context") | format_docs_runnable,
+                "context": itemgetter("context") | RunnableLambda(aformat_docs_with_step),
                 "input": itemgetter("input"),
                 "chat_history": itemgetter("chat_history"),
             }
             | qa_prompt
-            | llm
+            | RunnableLambda(agenerate_response_with_step)
             | StrOutputParser()
         )
 
@@ -508,60 +527,235 @@ async def aanswer_question(
         raise RuntimeError(f"Error answering question: {e}") from e
 
 
+def merge_risk_flags(risk_flags_list: List[List[Any]]) -> List[dict]:
+    """Merges and deduplicates risk flags from different chunks, keeping the highest risk level.
+    
+    Level priority: 'high' > 'medium' > 'low'.
+    """
+    level_priority = {"high": 3, "medium": 2, "low": 1}
+    merged_flags = {}
+    
+    for flags in risk_flags_list:
+        for flag in flags:
+            if hasattr(flag, "dict"):
+                flag_dict = flag.dict()
+            elif isinstance(flag, dict):
+                flag_dict = flag
+            else:
+                continue
+                
+            clause = flag_dict.get("clause", "").strip()
+            reason = flag_dict.get("reason", "").strip()
+            level = str(flag_dict.get("level", "low")).strip().lower()
+            
+            if not clause:
+                continue
+                
+            clause_lower = clause.lower()
+            if clause_lower not in merged_flags:
+                merged_flags[clause_lower] = {
+                    "clause": clause,
+                    "reason": reason,
+                    "level": level if level in level_priority else "low"
+                }
+            else:
+                existing_level = merged_flags[clause_lower]["level"]
+                new_priority = level_priority.get(level, 1)
+                existing_priority = level_priority.get(existing_level, 1)
+                if new_priority > existing_priority:
+                    merged_flags[clause_lower]["level"] = level
+                    merged_flags[clause_lower]["reason"] = reason
+                    
+    return list(merged_flags.values())
+
+
+def get_consolidated_summary(
+    summaries: List[str], 
+    response_lang: str, 
+    llm_client: LLMClientInterface
+) -> str:
+    """Invokes the LLM to consolidate multiple chunk summaries into a single cohesive summary."""
+    if not summaries:
+        return ""
+    if len(summaries) == 1:
+        return summaries[0]
+        
+    combined_summaries_text = "\n\n".join(
+        f"--- Section {i+1} ---\n{summary}" 
+        for i, summary in enumerate(summaries) if summary.strip()
+    )
+    
+    if not combined_summaries_text.strip():
+        return ""
+        
+    consolidated_summary_prompt = (
+        "You are an expert legal advisor and document intelligence assistant.\n"
+        "Your task is to merge the following section-by-section summaries of a document into a single, cohesive, formal summary.\n"
+        "The summary must detail the risks, faults, liabilities, and key obligation terms of the entire document.\n"
+        "Avoid repeating identical points. Organize the final summary into logical paragraphs.\n"
+        f"You MUST write the final summary in {response_lang}.\n\n"
+        "Section Summaries:\n"
+        f"{combined_summaries_text}\n\n"
+        "Generate the consolidated summary text. Do NOT add any preamble or conversational explanation."
+    )
+    
+    try:
+        messages = [
+            {"role": "system", "content": "You are a document analysis assistant."},
+            {"role": "user", "content": consolidated_summary_prompt}
+        ]
+        return llm_client.ask(messages)
+    except Exception as e:
+        logger.error("Failed to consolidate summaries via LLM: %s", e)
+        return "\n\n".join(summaries)
+
+
+async def aget_consolidated_summary(
+    summaries: List[str], 
+    response_lang: str, 
+    llm_client: LLMClientInterface
+) -> str:
+    """Invokes the LLM asynchronously to consolidate multiple chunk summaries into a single cohesive summary."""
+    if not summaries:
+        return ""
+    if len(summaries) == 1:
+        return summaries[0]
+        
+    combined_summaries_text = "\n\n".join(
+        f"--- Section {i+1} ---\n{summary}" 
+        for i, summary in enumerate(summaries) if summary.strip()
+    )
+    
+    if not combined_summaries_text.strip():
+        return ""
+        
+    consolidated_summary_prompt = (
+        "You are an expert legal advisor and document intelligence assistant.\n"
+        "Your task is to merge the following section-by-section summaries of a document into a single, cohesive, formal summary.\n"
+        "The summary must detail the risks, faults, liabilities, and key obligation terms of the entire document.\n"
+        "Avoid repeating identical points. Organize the final summary into logical paragraphs.\n"
+        f"You MUST write the final summary in {response_lang}.\n\n"
+        "Section Summaries:\n"
+        f"{combined_summaries_text}\n\n"
+        "Generate the consolidated summary text. Do NOT add any preamble or conversational explanation."
+    )
+    
+    try:
+        messages = [
+            {"role": "system", "content": "You are a document analysis assistant."},
+            {"role": "user", "content": consolidated_summary_prompt}
+        ]
+        return await llm_client.aask(messages)
+    except Exception as e:
+        logger.error("Failed to consolidate summaries asynchronously via LLM: %s", e)
+        return "\n\n".join(summaries)
+
+
 def generate_risk_and_draft(
     text: str, 
     language: str, 
     llm_client: LLMClientInterface = default_llm_client
 ) -> dict:
-    """Generates risk flags and a combined summary based on the raw document text and detected language.
+    """Generates risk flags and a combined summary using a hybrid chunking strategy.
     
-    Returns:
-        A dict containing:
-            - risk_flags: List[dict], each with 'clause', 'reason', and 'level' ('high'|'medium'|'low')
-            - risk_obligation_summary: str
+    It cleans boilerplate, chunks the text, analyzes chunks in parallel using ThreadPoolExecutor,
+    and merges the risk flags and summaries.
     """
     if not text or not text.strip():
         return {"risk_flags": [], "risk_obligation_summary": ""}
 
-    # Truncate text if it's too long
-    if len(text) > 30000:
-        logger.warning(
-            "Document text length (%d) exceeds the 30,000 character limit. "
-            "Truncating text to the first 30,000 characters before sending to the LLM for risk and draft generation. "
-            "The second half of the document will not be analyzed.",
-            len(text)
-        )
-    truncated_text = text[:30000]
+    cleaned_text = clean_boilerplate(text)
+    if not cleaned_text.strip():
+        cleaned_text = text
+
+    from app.utils.text_chunking import split_text
+    chunks = split_text(
+        cleaned_text,
+        chunk_size=12000,
+        chunk_overlap=2400,
+        separators=["\n\n", "\n", ". ", " ", ""]
+    )
+    
+    if not chunks:
+        return {"risk_flags": [], "risk_obligation_summary": ""}
 
     is_hindi = language in ("hi", "hi-Latn", "hindi", "hinglish")
     response_lang = "Hindi (in Devanagari script)" if is_hindi else "English"
 
-    try:
-        parser = JsonOutputParser(pydantic_object=RiskAnalysisAndDraft)
-        fixing_parser = OutputFixingParser.from_llm(
-            parser=parser,
-            llm=llm_client.get_primary_llm()
-        )
-        prompt = get_risk_analysis_prompt(response_lang, is_truncated=len(text) > 30000).partial(
-            format_instructions=parser.get_format_instructions()
-        )
-        
-        llm = llm_client.get_resilient_llm()
-        chain = prompt | llm | fixing_parser
-        
-        result = chain.invoke({"context": truncated_text})
-        
-        if not isinstance(result, dict):
-            result = dict(result)
-        if "risk_flags" not in result:
-            result["risk_flags"] = []
-        if "risk_obligation_summary" not in result:
-            result["risk_obligation_summary"] = ""
+    # Set up parser and chain
+    parser = JsonOutputParser(pydantic_object=RiskAnalysisAndDraft)
+    fixing_parser = OutputFixingParser.from_llm(
+        parser=parser,
+        llm=llm_client.get_primary_llm()
+    )
+    prompt = get_risk_analysis_prompt(response_lang, is_truncated=False).partial(
+        format_instructions=parser.get_format_instructions()
+    )
+    llm = llm_client.get_resilient_llm()
+    chain = prompt | llm | fixing_parser
+
+    # Process only up to 15 chunks
+    max_chunks = 15
+    chunks_to_process = chunks[:max_chunks]
+    
+    logger.info(f"Generating risk analysis for {len(chunks_to_process)} chunks in parallel...")
+
+    def analyze_chunk(chunk_text: str, chunk_index: int) -> dict:
+        chunk_snippet = chunk_text[:100].replace('\n', ' ')
+        try:
+            logger.info(f"Analyzing risks for chunk {chunk_index + 1}/{len(chunks_to_process)} (len={len(chunk_text)}, snippet='{chunk_snippet}')...")
+            result = chain.invoke({"context": chunk_text})
             
-        return result
-    except Exception as e:
-        logger.error("Failed to generate risk/draft via LLM: %s", e, exc_info=True)
-        return {"risk_flags": [], "risk_obligation_summary": "Failed to generate risk and obligation summary due to an internal error."}
+            if hasattr(result, "dict"):
+                result_dict = result.dict()
+            elif isinstance(result, dict):
+                result_dict = result
+            else:
+                result_dict = dict(result)
+                
+            if "risk_flags" not in result_dict:
+                result_dict["risk_flags"] = []
+            if "risk_obligation_summary" not in result_dict:
+                result_dict["risk_obligation_summary"] = ""
+                
+            logger.info(f"Successfully analyzed risks for chunk {chunk_index + 1}/{len(chunks_to_process)}.")
+            return result_dict
+        except Exception as e:
+            logger.error(
+                f"Failed risk analysis on chunk {chunk_index + 1}/{len(chunks_to_process)} "
+                f"(len={len(chunk_text)}, snippet='{chunk_snippet}'): {e}", 
+                exc_info=True
+            )
+            return {"risk_flags": [], "risk_obligation_summary": ""}
+
+    all_chunk_results = []
+    from concurrent.futures import ThreadPoolExecutor, as_completed
+    
+    with ThreadPoolExecutor(max_workers=3) as executor:
+        futures = {executor.submit(analyze_chunk, chunk, idx): idx for idx, chunk in enumerate(chunks_to_process)}
+        for future in as_completed(futures):
+            chunk_idx = futures[future]
+            try:
+                res = future.result()
+                all_chunk_results.append(res)
+            except Exception as e:
+                logger.error(f"Thread for risk analysis chunk {chunk_idx + 1} raised an exception: {e}")
+
+    if not all_chunk_results:
+        return {"risk_flags": [], "risk_obligation_summary": "Failed to analyze document risks."}
+
+    # Merge risk flags
+    all_risk_flags = [res.get("risk_flags", []) for res in all_chunk_results]
+    merged_risk_flags = merge_risk_flags(all_risk_flags)
+
+    # Merge and consolidate summaries
+    all_summaries = [res.get("risk_obligation_summary", "") for res in all_chunk_results if res.get("risk_obligation_summary", "")]
+    consolidated_summary = get_consolidated_summary(all_summaries, response_lang, llm_client)
+
+    return {
+        "risk_flags": merged_risk_flags,
+        "risk_obligation_summary": consolidated_summary
+    }
 
 
 async def agenerate_risk_and_draft(
@@ -569,52 +763,93 @@ async def agenerate_risk_and_draft(
     language: str, 
     llm_client: LLMClientInterface = default_llm_client
 ) -> dict:
-    """Generates risk flags and a combined summary asynchronously based on the raw document text and detected language.
+    """Generates risk flags and a combined summary asynchronously using a hybrid chunking strategy.
     
-    Returns:
-        A dict containing:
-            - risk_flags: List[dict], each with 'clause', 'reason', and 'level' ('high'|'medium'|'low')
-            - risk_obligation_summary: str
+    It cleans boilerplate, chunks the text, analyzes chunks concurrently,
+    and merges the risk flags and summaries.
     """
     if not text or not text.strip():
         return {"risk_flags": [], "risk_obligation_summary": ""}
 
-    # Truncate text if it's too long
-    if len(text) > 30000:
-        logger.warning(
-            "Document text length (%d) exceeds the 30,000 character limit. "
-            "Truncating text to the first 30,000 characters before sending to the LLM for risk and draft generation. "
-            "The second half of the document will not be analyzed.",
-            len(text)
-        )
-    truncated_text = text[:30000]
+    cleaned_text = clean_boilerplate(text)
+    if not cleaned_text.strip():
+        cleaned_text = text
+
+    from app.utils.text_chunking import split_text
+    chunks = split_text(
+        cleaned_text,
+        chunk_size=12000,
+        chunk_overlap=2400,
+        separators=["\n\n", "\n", ". ", " ", ""]
+    )
+    
+    if not chunks:
+        return {"risk_flags": [], "risk_obligation_summary": ""}
 
     is_hindi = language in ("hi", "hi-Latn", "hindi", "hinglish")
     response_lang = "Hindi (in Devanagari script)" if is_hindi else "English"
 
-    try:
-        parser = JsonOutputParser(pydantic_object=RiskAnalysisAndDraft)
-        fixing_parser = OutputFixingParser.from_llm(
-            parser=parser,
-            llm=llm_client.get_primary_llm()
-        )
-        prompt = get_risk_analysis_prompt(response_lang, is_truncated=len(text) > 30000).partial(
-            format_instructions=parser.get_format_instructions()
-        )
-        
-        llm = llm_client.get_resilient_llm()
-        chain = prompt | llm | fixing_parser
-        
-        result = await chain.ainvoke({"context": truncated_text})
-        
-        if not isinstance(result, dict):
-            result = dict(result)
-        if "risk_flags" not in result:
-            result["risk_flags"] = []
-        if "risk_obligation_summary" not in result:
-            result["risk_obligation_summary"] = ""
+    # Set up parser and chain
+    parser = JsonOutputParser(pydantic_object=RiskAnalysisAndDraft)
+    fixing_parser = OutputFixingParser.from_llm(
+        parser=parser,
+        llm=llm_client.get_primary_llm()
+    )
+    prompt = get_risk_analysis_prompt(response_lang, is_truncated=False).partial(
+        format_instructions=parser.get_format_instructions()
+    )
+    llm = llm_client.get_resilient_llm()
+    chain = prompt | llm | fixing_parser
+
+    # Process only up to 15 chunks
+    max_chunks = 15
+    chunks_to_process = chunks[:max_chunks]
+    
+    logger.info(f"Generating risk analysis asynchronously for {len(chunks_to_process)} chunks in parallel...")
+
+    async def analyze_chunk(chunk_text: str, chunk_index: int) -> dict:
+        chunk_snippet = chunk_text[:100].replace('\n', ' ')
+        try:
+            logger.info(f"Analyzing risks for chunk {chunk_index + 1}/{len(chunks_to_process)} (len={len(chunk_text)}, snippet='{chunk_snippet}')...")
+            result = await chain.ainvoke({"context": chunk_text})
             
-        return result
-    except Exception as e:
-        logger.error("Failed to generate risk/draft via LLM asynchronously: %s", e, exc_info=True)
-        return {"risk_flags": [], "risk_obligation_summary": "Failed to generate risk and obligation summary due to an internal error."}
+            if hasattr(result, "dict"):
+                result_dict = result.dict()
+            elif isinstance(result, dict):
+                result_dict = result
+            else:
+                result_dict = dict(result)
+                
+            if "risk_flags" not in result_dict:
+                result_dict["risk_flags"] = []
+            if "risk_obligation_summary" not in result_dict:
+                result_dict["risk_obligation_summary"] = ""
+                
+            logger.info(f"Successfully analyzed risks for chunk {chunk_index + 1}/{len(chunks_to_process)}.")
+            return result_dict
+        except Exception as e:
+            logger.error(
+                f"Failed risk analysis on chunk {chunk_index + 1}/{len(chunks_to_process)} "
+                f"(len={len(chunk_text)}, snippet='{chunk_snippet}'): {e}", 
+                exc_info=True
+            )
+            return {"risk_flags": [], "risk_obligation_summary": ""}
+
+    tasks = [analyze_chunk(chunk, idx) for idx, chunk in enumerate(chunks_to_process)]
+    all_chunk_results = await asyncio.gather(*tasks)
+
+    if not all_chunk_results:
+        return {"risk_flags": [], "risk_obligation_summary": "Failed to analyze document risks."}
+
+    # Merge risk flags
+    all_risk_flags = [res.get("risk_flags", []) for res in all_chunk_results]
+    merged_risk_flags = merge_risk_flags(all_risk_flags)
+
+    # Merge and consolidate summaries
+    all_summaries = [res.get("risk_obligation_summary", "") for res in all_chunk_results if res.get("risk_obligation_summary", "")]
+    consolidated_summary = await aget_consolidated_summary(all_summaries, response_lang, llm_client)
+
+    return {
+        "risk_flags": merged_risk_flags,
+        "risk_obligation_summary": consolidated_summary
+    }

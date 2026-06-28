@@ -15,3 +15,10 @@ langdetect
 python-dotenv
 langchain_text_splitters
 langchain-google-genai
+pytesseract
+pdf2image 
+pillow
+spacy
+transformers
+torch
+langgraph-checkpoint-sqlite

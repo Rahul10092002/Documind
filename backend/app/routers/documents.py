@@ -1,13 +1,16 @@
 import asyncio
 import logging
+import io
 from pathlib import Path
 from datetime import datetime, timezone
 
-from fastapi import APIRouter, Depends, File, HTTPException, Query, UploadFile, status
+import fitz
+from fastapi import APIRouter, Depends, File, HTTPException, Query, UploadFile, status, BackgroundTasks
+from fastapi.responses import StreamingResponse
 
 from sqlalchemy.orm import Session
 
-from app.database import get_db
+from app.database import get_db, SessionLocal
 from app.models import Document, DocumentStatus, ChatMessage, MessageRole, AnalysisResult
 from app.schemas import DocumentOut, DocumentSummaryOut, ChatRequest, ChatResponse, ChatMessageOut, AnalysisResultOut
 from app.utils import (
@@ -21,6 +24,7 @@ from app.utils import (
     run_full_entity_extraction,
 )
 from app.utils.answer_service import aanswer_question, agenerate_risk_and_draft
+from app.utils.pdf_generator import generate_analysis_pdf
 
 logger = logging.getLogger(__name__)
 
@@ -64,6 +68,108 @@ def find_physical_file(doc: Document) -> Path | None:
 
 
 
+async def process_document_background(doc_id: str, filename: str, contents: bytes):
+    db = SessionLocal()
+    try:
+        # 1. Locate/verify Document
+        doc = db.query(Document).filter(Document.id == doc_id).first()
+        if not doc:
+            logger.error("Background task: Document with ID %s not found in DB.", doc_id)
+            return
+
+        # 2. Save PDF to disk
+        now = datetime.now(timezone.utc)
+        timestamp = now.strftime("%Y%m%d_%H%M%S_%f")
+        safe_filename = Path(filename).name
+        dest_path = UPLOAD_DIR / f"{timestamp}_{safe_filename}"
+        
+        try:
+            dest_path.write_bytes(contents)
+            doc.file_path = str(dest_path)
+            db.commit()
+            logger.info("Background task: Saved uploaded file to %s", dest_path)
+        except OSError as exc:
+            logger.error("Background task: Failed to save file to disk: %s", exc)
+            raise exc
+
+        # 3. Extract text
+        doc.detailed_status = "Reading & extracting structure..."
+        db.commit()
+        
+        try:
+            from app.utils.pdf_extraction import extract_text_and_docs_from_pdf
+            raw_text, docs = await asyncio.to_thread(extract_text_and_docs_from_pdf, dest_path)
+            doc.raw_text = raw_text
+            db.commit()
+            logger.info("Background task: Extracted %d chars from %s", len(raw_text), dest_path.name)
+        except Exception as exc:
+            logger.error("Background task: Text extraction failed: %s", exc)
+            raise exc
+
+        # 4. Detect language
+        doc.detailed_status = "Detecting language..."
+        db.commit()
+        language = await asyncio.to_thread(detect_language, raw_text)
+        doc.language = language
+        db.commit()
+
+        # 5. Index chunks
+        doc.detailed_status = "Indexing content for search..."
+        db.commit()
+        chunks = await asyncio.to_thread(split_documents, docs)
+        await asyncio.to_thread(add_document_chunks, document_id=doc.id, chunks=chunks, filename=doc.filename)
+
+        # 6. Extract key details
+        doc.detailed_status = "Extracting key details..."
+        db.commit()
+        entities = await asyncio.to_thread(run_full_entity_extraction, raw_text, language=language)
+
+        # 7. Perform risk review
+        doc.detailed_status = "Performing risk review..."
+        db.commit()
+        try:
+            risk_draft = await agenerate_risk_and_draft(raw_text, language=language)
+            risk_flags = risk_draft.get("risk_flags", [])
+            risk_obligation_summary = risk_draft.get("risk_obligation_summary", "")
+        except Exception as exc:
+            logger.error("Background task: Failed to generate risk/draft: %s", exc)
+            risk_flags = []
+            risk_obligation_summary = ""
+
+        analysis = AnalysisResult(
+            document_id=doc.id,
+            extracted_entities=entities,
+            risk_flags=risk_flags,
+            risk_obligation_summary=risk_obligation_summary
+        )
+        db.add(analysis)
+
+        # Mark as completed
+        doc.status = DocumentStatus.completed
+        doc.detailed_status = "Completed"
+        db.commit()
+        logger.info("Background task: Successfully indexed and analyzed document id=%s", doc_id)
+
+    except Exception as exc:
+        logger.error("Background task: Processing failed for document id=%s: %s", doc_id, exc)
+        try:
+            doc = db.query(Document).filter(Document.id == doc_id).first()
+            if doc:
+                doc.status = DocumentStatus.failed
+                doc.detailed_status = f"Failed: {str(exc)}"
+                db.commit()
+        except Exception as e:
+            logger.error("Background task: Failed to update document status to failed: %s", e)
+        try:
+            if 'dest_path' in locals() and dest_path.exists():
+                dest_path.unlink(missing_ok=True)
+                logger.info("Background task: Cleaned up file from disk: %s", dest_path)
+        except Exception as cleanup_exc:
+            logger.error("Background task: Failed to cleanup file %s: %s", dest_path, cleanup_exc)
+    finally:
+        db.close()
+
+
 @router.post(
     "/upload",
     response_model=DocumentOut,
@@ -78,12 +184,11 @@ def find_physical_file(doc: Document) -> Path | None:
     ),
 )
 async def upload_document(
+    background_tasks: BackgroundTasks,
     file: UploadFile = File(..., description="PDF file to upload"),
     db: Session = Depends(get_db),
 ) -> DocumentOut:
     # ── 1. Read bytes and validate magic header BEFORE writing to disk ───────
-    # This prevents malicious files (e.g. .exe or .zip renamed to .pdf) from
-    # ever landing in the uploads directory. All real PDFs begin with b"%PDF".
     contents = await file.read()
     if not contents.startswith(b"%PDF"):
         raise HTTPException(
@@ -91,126 +196,27 @@ async def upload_document(
             detail="File is not a valid PDF (invalid magic bytes). Only PDF files are accepted.",
         )
 
-    # ── 2. Save to disk ──────────────────────────────────────────────────────
-    # Use a timestamp prefix to avoid filename collisions
+    # ── 2. Create the document row in state 'processing' immediately ───
     now = datetime.now(timezone.utc)
-    timestamp = now.strftime("%Y%m%d_%H%M%S_%f")
-    safe_filename = Path(file.filename).name  # strip any path traversal
-    dest_path = UPLOAD_DIR / f"{timestamp}_{safe_filename}"
+    doc = Document(
+        filename=Path(file.filename).name,
+        upload_date=now,
+        status=DocumentStatus.processing,
+        detailed_status="Reading & extracting structure...",
+    )
+    db.add(doc)
+    db.commit()
+    db.refresh(doc)
+    logger.info("Inserted document id=%s (%s), status set to processing", doc.id, doc.filename)
 
-    try:
-        dest_path.write_bytes(contents)
-        logger.info("Saved uploaded file to %s", dest_path)
-    except OSError as exc:
-        logger.error("Failed to save file: %s", exc)
-        raise HTTPException(
-            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail="Could not save the uploaded file.",
-        ) from exc
+    # ── 3. Queue the background processing task ───
+    background_tasks.add_task(
+        process_document_background,
+        doc.id,
+        file.filename,
+        contents,
+    )
 
-    # Clean up the file on disk if any failure occurs before the document row is successfully committed
-    try:
-        # ── 3. Extract raw text via PyMuPDFLoader ─────────────────────────────────
-        try:
-            from langchain_community.document_loaders import PyMuPDFLoader
-            from app.utils.pdf_extraction import normalize_devanagari
-
-            loader = PyMuPDFLoader(str(dest_path))
-            docs = loader.load()
-
-            for d in docs:
-                d.page_content = normalize_devanagari(d.page_content)
-
-            raw_text = "\n".join([d.page_content for d in docs])
-            logger.info("Extracted %d chars from %s using PyMuPDFLoader", len(raw_text), dest_path.name)
-        except Exception as exc:
-            logger.error("Text extraction failed: %s", exc)
-            raise HTTPException(
-                status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
-                detail="Could not extract text from the PDF. Ensure it is not corrupted.",
-            ) from exc
-
-        # ── 4. Detect language ───────────────────────────────────────────────────
-        language = detect_language(raw_text)
-        logger.info("Detected language: %s", language)
-
-        # ── 5. Persist to DB and Index ───────────────────────────────────────────
-        doc = Document(
-            filename=safe_filename,
-            file_path=str(dest_path),
-            upload_date=now,
-            language=language,
-            raw_text=raw_text,
-            status=DocumentStatus.processing,
-        )
-        db.add(doc)
-        db.commit()
-        db.refresh(doc)
-        logger.info("Inserted document id=%s (%s), status set to processing", doc.id, doc.filename)
-    except Exception as exc:
-        db.rollback()
-        try:
-            dest_path.unlink(missing_ok=True)
-            logger.info("Cleaned up orphaned file from disk: %s", dest_path)
-        except Exception as unlink_exc:
-            logger.error("Failed to unlink orphaned file %s: %s", dest_path, unlink_exc)
-
-        if isinstance(exc, HTTPException):
-            raise exc
-        raise HTTPException(
-            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail=f"Failed to process and save document: {exc}",
-        ) from exc
-
-    try:
-        chunks = split_documents(docs)
-        logger.info("Generated %d text chunks for document id=%s", len(chunks), doc.id)
-        
-        # Index chunks in ChromaDB
-        add_document_chunks(document_id=doc.id, chunks=chunks, filename=doc.filename)
-        
-        # Run full analysis and create AnalysisResult
-        logger.info("Running full entity extraction for document id=%s", doc.id)
-        # run_full_entity_extraction is synchronous (makes blocking LLM calls).
-        # Offload to a thread pool to avoid stalling the async event loop.
-        entities = await asyncio.to_thread(run_full_entity_extraction, raw_text, language=language)
-        
-        logger.info("Running risk and combined summary generation for document id=%s", doc.id)
-        try:
-            risk_draft = await agenerate_risk_and_draft(raw_text, language=language)
-            risk_flags = risk_draft.get("risk_flags", [])
-            risk_obligation_summary = risk_draft.get("risk_obligation_summary", "")
-        except Exception as exc:
-            logger.error("Failed to generate risk/draft for document id=%s: %s", doc.id, exc)
-            risk_flags = []
-            risk_obligation_summary = ""
-
-        analysis = AnalysisResult(
-            document_id=doc.id,
-            extracted_entities=entities,
-            risk_flags=risk_flags,
-            risk_obligation_summary=risk_obligation_summary
-        )
-        db.add(analysis)
-        
-        # Update status to completed
-        doc.status = DocumentStatus.completed
-        db.commit()
-        db.refresh(doc)
-        logger.info("Successfully indexed and analyzed document id=%s and set status to completed", doc.id)
-    except Exception as exc:
-        logger.error("Failed to process/index document id=%s: %s", doc.id, exc)
-        doc.status = DocumentStatus.failed
-        db.commit()
-        db.refresh(doc)
-        # Raise HTTP exception to notify client of the processing failure
-        raise HTTPException(
-            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail=f"Document uploaded but indexing failed: {exc}",
-        ) from exc
-
-    # The endpoint's response_model is `DocumentOut` — return the persisted
-    # `Document` instance so FastAPI can serialize the expected fields.
     return doc
 
 
@@ -276,6 +282,92 @@ async def chat_with_document(
         sources=rag_response["sources"],
         suggested_questions=rag_response.get("suggested_questions", [])
     )
+
+
+@router.post(
+    "/{document_id}/chat/stream",
+    summary="Ask a question about a document and stream progress updates",
+    description="Takes a document ID and a question, runs RAG pipeline and yields progress updates as SSE chunks before returning final answer."
+)
+async def chat_with_document_stream(
+    document_id: str,
+    payload: ChatRequest,
+    db: Session = Depends(get_db),
+):
+    import json
+    # 1. Check if the document exists
+    doc = db.query(Document).filter(Document.id == document_id).first()
+    if not doc:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"Document with ID {document_id} was not found."
+        )
+
+    async def event_generator():
+        # We use a Queue to pass steps and final results from the pipeline callback
+        queue = asyncio.Queue()
+
+        async def enqueue_step(step_name: str):
+            await queue.put(("step", step_name))
+
+        # Start the RAG pipeline in a background task
+        async def run_pipeline():
+            try:
+                rag_response = await aanswer_question(
+                    document_id=document_id,
+                    question=payload.question,
+                    db=db,
+                    on_step=enqueue_step
+                )
+                await queue.put(("answer", rag_response))
+            except Exception as e:
+                logger.error("RAG pipeline failed in stream: %s", e)
+                await queue.put(("error", str(e)))
+
+        task = asyncio.create_task(run_pipeline())
+
+        while True:
+            item_type, val = await queue.get()
+            if item_type == "step":
+                yield f"step:{val}\n"
+            elif item_type == "answer":
+                # Store message in DB
+                try:
+                    user_msg = ChatMessage(
+                        document_id=document_id,
+                        role=MessageRole.user,
+                        content=payload.question
+                    )
+                    assistant_msg = ChatMessage(
+                        document_id=document_id,
+                        role=MessageRole.assistant,
+                        content=val["answer"]
+                    )
+                    db.add(user_msg)
+                    db.add(assistant_msg)
+                    db.commit()
+                    logger.info("Saved user query and assistant response for document_id=%s in chat_messages (stream)", document_id)
+                except Exception as db_exc:
+                    logger.error("Failed to save chat exchange to database (stream): %s", db_exc)
+
+                # Serialize final payload
+                chat_resp = {
+                    "answer": val["answer"],
+                    "document_id": val["document_id"],
+                    "chunks_used": val["chunks_used"],
+                    "confidence": val["confidence"],
+                    "sources": val["sources"],
+                    "suggested_questions": val.get("suggested_questions", [])
+                }
+                yield f"answer:{json.dumps(chat_resp)}\n"
+                break
+            elif item_type == "error":
+                yield f"error:{val}\n"
+                break
+
+        await task
+
+    return StreamingResponse(event_generator(), media_type="text/event-stream")
 
 
 @router.get(
@@ -519,3 +611,49 @@ def delete_document(
     db.commit()
     logger.info("Deleted document id=%s and all associated data", document_id)
     return
+
+
+from app.utils.pdf_generator import generate_analysis_pdf
+
+
+@router.get(
+    "/{document_id}/export",
+    summary="Export analysis results as PDF",
+    description="Generates and returns a downloadable A4 PDF report with all document analysis results.",
+)
+def export_analysis_pdf(
+    document_id: str,
+    db: Session = Depends(get_db),
+):
+    doc_row = db.query(Document).filter(Document.id == document_id).first()
+    if not doc_row:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"Document with ID {document_id} was not found."
+        )
+        
+    analysis = db.query(AnalysisResult).filter(AnalysisResult.document_id == document_id).first()
+    if not analysis:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"No analysis results found for document {document_id}. Please analyze the document first."
+        )
+        
+    try:
+        pdf_data = generate_analysis_pdf(doc_row.filename, analysis)
+    except Exception as e:
+        logger.error("Failed to generate PDF report for document %s: %s", document_id, e, exc_info=True)
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Failed to generate PDF report: {e}"
+        )
+        
+    safe_filename = Path(doc_row.filename).stem
+    headers = {
+        "Content-Disposition": f"attachment; filename=DocMind_Analysis_{safe_filename}.pdf"
+    }
+    return StreamingResponse(
+        io.BytesIO(pdf_data),
+        media_type="application/pdf",
+        headers=headers
+    )

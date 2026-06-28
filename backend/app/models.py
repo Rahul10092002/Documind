@@ -71,6 +71,7 @@ class Document(Base):
         nullable=False,
         default=DocumentStatus.pending,
     )
+    detailed_status = Column(String(255), nullable=True)
 
     # Relationships
     analysis_result = relationship(

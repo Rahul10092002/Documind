@@ -15,4 +15,14 @@ phase2.md
 review.md
 # Backend Test/Debug Scripts
 backend/test_*.py
+backend/test_*.pdf
+backend/test_files/
 backend/check_llm_provider.py
+**/test_*
+**/test_files/
+**/tests/
+
+# Exclude markdown files except README.md
+**/*.md
+!**/README.md
+!**/readme.md

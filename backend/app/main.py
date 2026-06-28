@@ -2,6 +2,22 @@ import logging
 import warnings
 warnings.filterwarnings("ignore", category=DeprecationWarning)
 
+# ── Logging setup ─────────────────────────────────────────────────────────────
+# Configure the root logger so that all app.* module loggers emit INFO and
+# above.  Uvicorn's own access logger (uvicorn.access) is unaffected — it has
+# its own handler configured by uvicorn at startup.
+# httpx / httpcore are pinned to WARNING to suppress connection-level chatter.
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(levelname)s:%(name)s: %(message)s",
+)
+logging.getLogger("httpx").setLevel(logging.WARNING)
+logging.getLogger("httpcore").setLevel(logging.WARNING)
+logging.getLogger("groq").setLevel(logging.WARNING)
+logging.getLogger("google").setLevel(logging.WARNING)
+logging.getLogger("google_genai").setLevel(logging.WARNING)
+# ─────────────────────────────────────────────────────────────────────────────
+
 from contextlib import asynccontextmanager
 
 from app.config import settings
@@ -34,7 +50,7 @@ async def lifespan(app: FastAPI):
     models.Base.metadata.create_all(bind=engine)
     logger.info("Database tables created / verified.")
 
-    # Run self-healing migration to add new risk_obligation_summary column if not present
+    # Run self-healing migration to add new columns if not present
     try:
         from sqlalchemy import inspect, text
         inspector = inspect(engine)
@@ -43,6 +59,12 @@ async def lifespan(app: FastAPI):
             logger.info("Migrating database: adding risk_obligation_summary column to analysis_results")
             with engine.begin() as conn:
                 conn.execute(text("ALTER TABLE analysis_results ADD COLUMN risk_obligation_summary TEXT"))
+        
+        doc_columns = [col["name"] for col in inspector.get_columns("documents")]
+        if "detailed_status" not in doc_columns:
+            logger.info("Migrating database: adding detailed_status column to documents")
+            with engine.begin() as conn:
+                conn.execute(text("ALTER TABLE documents ADD COLUMN detailed_status VARCHAR(255)"))
     except Exception as exc:
         logger.error("Failed to run database migrations: %s", exc)
 
