@@ -2,10 +2,10 @@ import os
 import sys
 
 # Ensure the backend directory is in python path
-sys.path.append(os.path.dirname(os.path.abspath(__file__)))
+sys.path.append(os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
 
 from app.config import settings
-from app.utils.answer_service import answer_question
+from app.services import answer_question
 
 
 def run_rag_test(doc_id: int, filename: str, tests: list[dict]):

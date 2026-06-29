@@ -1,12 +1,12 @@
 from .state import DocuMindState
 
-from app.utils.pdf_extraction import (
+from app.extractors.pdf_extraction import (
     extract_text_and_docs_from_pdf,
     is_scanned_pdf,
 )
-from app.utils.word_extraction import extract_word_text_and_docs
-from app.utils.image_extraction import extract_image_text_and_docs
-from app.utils.text_extraction import extract_text_from_file
+from app.extractors.word_extraction import extract_word_text_and_docs
+from app.extractors.image_extraction import extract_image_text_and_docs
+from app.extractors.text_extraction import extract_text_from_file
 
 
 def _ingest(state: DocuMindState, extractor) -> DocuMindState:

@@ -1,4 +1,4 @@
-from app.utils.regex_parser import extract_dates, extract_currencies, extract_entities_via_regex
+from app.extractors.regex_parser import extract_dates, extract_currencies, extract_entities_via_regex
 
 
 def test_numerical_dates_english():

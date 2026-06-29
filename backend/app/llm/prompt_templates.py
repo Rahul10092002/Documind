@@ -7,10 +7,18 @@ from langchain_core.prompts import ChatPromptTemplate, MessagesPlaceholder
 # Three contrastive examples anchor HIGH / MEDIUM / LOW thresholds.
 # Kept minimal (one line each) to avoid token waste while preserving
 # the contrastive signal frontier models need.
-_RISK_CALIBRATION = """Calibration examples:
-Clause: "Landlord may terminate with 24 hours notice." → HIGH (no time to vacate or contest)
-Clause: "Disputes resolved through mutual discussion." → MEDIUM (no timeline, mediator, or escalation path)
-Clause: "Governed by the laws of the State." → LOW (standard boilerplate)
+_RISK_CALIBRATION_EN = """Calibration examples:
+HIGH: Unilateral termination without cause
+HIGH: Uncapped liability clauses
+MEDIUM: Automatic renewal without notice
+LOW: Standard confidentiality clauses
+"""
+
+_RISK_CALIBRATION_HI = """अंशांकन उदाहरण (Calibration examples):
+HIGH: बिना कारण एकतरफा समाप्ति (Unilateral termination without cause)
+HIGH: असीमित देयता खंड (Uncapped liability clauses)
+MEDIUM: बिना सूचना के स्वचालित नवीनीकरण (Automatic renewal without notice)
+LOW: मानक गोपनीयता खंड (Standard confidentiality clauses)
 """
 
 
@@ -25,7 +33,7 @@ def get_qa_prompt(response_lang: str = "English") -> ChatPromptTemplate:
     Total token reduction: ~27%
     """
     system_prompt = (
-        "You are a document QA assistant. Language: {response_lang}.\n\n"
+        "You are a document QA assistant. Language: {response_lang}.\n"
         "Rules:\n"
         "1. Answer ONLY from the context below — no outside knowledge.\n"
         "2. If the answer is absent, reply exactly: "
@@ -59,6 +67,8 @@ def get_risk_analysis_prompt(response_lang: str, is_truncated: bool = False) -> 
         if is_truncated else ""
     )
 
+    calibration = _RISK_CALIBRATION_HI if "hindi" in response_lang.lower() else _RISK_CALIBRATION_EN
+
     system_prompt = (
         "Analyze the document and return a JSON object with fields "
         "`risk_flags` and `risk_obligation_summary`. "
@@ -67,14 +77,14 @@ def get_risk_analysis_prompt(response_lang: str, is_truncated: bool = False) -> 
         "risk_flags — for each risky clause:\n"
         "  clause: exact text (≤40 words)\n"
         "  reason: why it is risky\n"
-        "  level: \"high\" | \"medium\" | \"low\"\n\n"
+        "  level: \"HIGH\" | \"MEDIUM\" | \"LOW\"\n\n"
         "Level definitions:\n"
-        "  high — one-sided termination/eviction/payment terms that deny adequate recourse\n"
-        "  medium — vague language, missing standard protections, unclear liability\n"
-        "  low — minor boilerplate deviations, optional clauses, cosmetic issues\n\n"
+        "  HIGH — one-sided termination/eviction/payment terms that deny adequate recourse\n"
+        "  MEDIUM — vague language, missing standard protections, unclear liability\n"
+        "  LOW — minor boilerplate deviations, optional clauses, cosmetic issues\n\n"
         "risk_obligation_summary — one cohesive paragraph: risks, liabilities, and "
         "key obligations of each party.\n\n"
-        + _RISK_CALIBRATION +
+        + calibration +
         "\n{format_instructions}"
     )
 
@@ -215,3 +225,45 @@ def get_followup_questions_prompt(response_lang: str = "English") -> ChatPromptT
         ("system", system_prompt),
         ("human", "User Question: {user_question}\nAssistant Answer: {assistant_answer}\n\nGenerate the JSON array.")
     ])
+
+
+# ── Prompt Versioning Registry ───────────────────────────────────────────────
+from typing import Dict
+
+PROMPT_REGISTRY: Dict[str, str] = {
+    "entity_extraction_v1": (
+        "Extract entities from the following legal text:\n{text}"
+    ),
+    "entity_extraction_v2": (
+        "You are a legal document analyst specializing in Hindi/English contracts.\n"
+        "Extract structured entities from the text below.\n\n"
+        "Text:\n{text}\n\n"
+        "Return JSON with keys: parties, dates, amounts, obligations, jurisdiction.\n"
+        "For Hindi text, transliterate names to Roman script."
+    ),
+    "risk_flagging_v1": (
+        "Identify compliance risks in this legal document:\n{text}"
+    ),
+    "risk_flagging_v2": (
+        "You are a legal risk analyst. Review the following document for:\n"
+        "1. Missing signatures or witnesses\n"
+        "2. Ambiguous liability clauses\n"
+        "3. Non-standard termination terms\n"
+        "4. Jurisdiction conflicts\n\n"
+        "Document:\n{text}\n\n"
+        "Return a JSON list of risks, each with: type, severity, clause_text, recommendation."
+    ),
+}
+
+# Controlled switches
+ACTIVE_PROMPTS: Dict[str, str] = {
+    "entity_extraction": "entity_extraction_v2",
+    "risk_flagging": "risk_flagging_v1",
+}
+
+
+def get_prompt(task: str, **kwargs) -> str:
+    """Get active prompt for a task and fill template variables."""
+    key = ACTIVE_PROMPTS[task]
+    template = PROMPT_REGISTRY[key]
+    return template.format(**kwargs)

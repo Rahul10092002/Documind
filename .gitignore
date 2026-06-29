@@ -5,6 +5,16 @@ venv/
 __pycache__/
 *.pyc
 
+# Database & Storage
+*.db
+*.db-journal
+*.sqlite3
+backend/uploads/
+backend/chroma_db/
+chroma_db/
+backend/test.db
+test.db
+
 # IDEs
 .vscode/
 .idea/
@@ -18,9 +28,15 @@ backend/test_*.py
 backend/test_*.pdf
 backend/test_files/
 backend/check_llm_provider.py
-**/test_*
-**/test_files/
-**/tests/
+
+# Test Artifacts & Cache
+.pytest_cache/
+**/.pytest_cache/
+test_*.db
+test_*.sqlite
+test_*.pdf
+test_*.docx
+test_*.txt
 
 # Exclude markdown files except README.md
 **/*.md

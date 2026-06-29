@@ -1,4 +1,10 @@
 import logging
+from tenacity import (
+    retry,
+    stop_after_attempt,
+    wait_exponential,
+    before_sleep_log,
+)
 from abc import ABC, abstractmethod
 from typing import Any
 from langchain_groq import ChatGroq
@@ -165,6 +171,12 @@ class ConfiguredLLMClient(LLMClientInterface):
         except Exception as exc:
             logger.debug("_log_tokens failed silently: %s", exc)
 
+    @retry(
+        stop=stop_after_attempt(3),
+        wait=wait_exponential(multiplier=1, min=2, max=10),
+        before_sleep=before_sleep_log(logger, logging.WARNING),
+        reraise=True,
+    )
     def ask(self, messages) -> str:
         """Invokes LLM with automatic retry logic for network or server errors,
         and fallback to Gemini if Groq rate limits are hit.
@@ -174,6 +186,12 @@ class ConfiguredLLMClient(LLMClientInterface):
         self._log_tokens(response, label="qa")
         return str(response.content).strip()
 
+    @retry(
+        stop=stop_after_attempt(3),
+        wait=wait_exponential(multiplier=1, min=2, max=10),
+        before_sleep=before_sleep_log(logger, logging.WARNING),
+        reraise=True,
+    )
     async def aask(self, messages) -> str:
         """Invokes LLM asynchronously with automatic retry logic for network or server errors,
         and fallback to Gemini if Groq rate limits are hit.

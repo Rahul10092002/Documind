@@ -11,6 +11,7 @@ class DocuMindState(TypedDict):
     is_scanned:bool
     char_count:int
     detected_language:str
+    detected_boilerplate:list[str]
     language_confidence:float
     prompt_locale:str
     ner_entities:dict
@@ -19,6 +20,8 @@ class DocuMindState(TypedDict):
     risk_flags_raw:list[dict]
     risk_flags_deduped:list[dict]
     executive_summary:str
+    risk_analysis_partial:Optional[bool]
+    executive_summary_available:Optional[bool]
     retrieved_chunks:list[Document]
     rag_answer:str
     confidence_score:float

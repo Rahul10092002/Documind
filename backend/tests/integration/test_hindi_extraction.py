@@ -8,7 +8,7 @@ from typing import Dict, Any
 sys.stdout.reconfigure(encoding='utf-8')
 
 # Ensure the backend directory is in python path and change directory
-backend_path = os.path.dirname(os.path.abspath(__file__))
+backend_path = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 if backend_path not in sys.path:
     sys.path.insert(0, backend_path)
 os.chdir(backend_path)

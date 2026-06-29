@@ -1,7 +1,7 @@
 import logging
 from abc import ABC, abstractmethod
 from app.config import settings
-from app.utils.vector_store import get_vector_store
+from app.vectordb.vector_store import get_vector_store
 
 logger = logging.getLogger(__name__)
 

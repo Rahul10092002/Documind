@@ -5,7 +5,7 @@ from unittest.mock import MagicMock, patch
 # Ensure the backend directory is in python path
 sys.path.append(os.path.dirname(os.path.abspath(__file__)))
 
-from app.utils.entity_extraction import run_full_entity_extraction
+from app.extractors.entity_extraction import run_full_entity_extraction
 
 
 def test_full_entity_extraction_mocked():

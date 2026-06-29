@@ -15,6 +15,7 @@ _HINGLISH_WORDS: frozenset[str] = frozenset(
         "ek", "do", "teen", "accha", "theek", "bilkul", "zaroor",
         "abhi", "phir", "bahut", "bohot", "thoda", "zyada", "baat",
         "log", "dil", "din", "raat", "ghar", "kaam", "naam", "pyaar",
+        "se", "tha", "thi",
     }
 )
 
@@ -29,31 +30,38 @@ _DEVANAGARI_RATIO_THRESHOLD = 0.10
 _HINGLISH_TOKEN_THRESHOLD = 0.08
 
 
-def detect_language(text: str) -> str | None:
-    """Detect the dominant language of *text* and return an ISO 639-1 code.
+_ENGLISH_WORDS: frozenset[str] = frozenset(
+    {
+        "the", "and", "of", "to", "in", "is", "that", "it", "was", "for",
+        "on", "are", "as", "with", "this", "by", "an", "be", "shall",
+        "agreement", "contract", "party", "parties", "herein", "thereof"
+    }
+)
+
+
+def detect_language(text: str) -> tuple[str | None, float]:
+    """Detect the dominant language of *text* and return (ISO 639-1 code, confidence).
 
     Detection strategy (applied in priority order):
 
     1. **Devanagari scan** – If ≥10 % of non-whitespace characters fall in the
        Devanagari Unicode block (U+0900–U+097F) the text is classified as
-       Hindi (``"hi"``).  This catches Hindi documents and Hinglish writing
-       that mixes Devanagari with Latin script, avoiding the frequent
-       misclassification by ``langdetect`` as Bengali or Nepali.
+       Hindi (``"hi"``).
 
     2. **Romanized Hinglish heuristic** – Tokenise the first 2 000 characters
        into lowercase words and count how many match a curated set of
-       high-frequency Hindi loanwords written in Latin script.  If the hit
-       ratio exceeds 8 % of all tokens the function returns ``"hi-Latn"``
-       (a BCP-47 tag indicating Hindi in Latin script / code-switched
-       Hinglish), so downstream prompts can be tuned for bilingual content.
+       high-frequency Hindi loanwords written in Latin script.
 
-    3. **langdetect fallback** – For all other text (plain English, other
+    3. **English word heuristic** – Count high-frequency English words in the
+       tokenized snippet. If above threshold, instantly classify as English (``"en"``).
+
+    4. **langdetect fallback** – For all other text (plain English, other
        languages) the standard ``langdetect`` library is used.
 
-    Returns ``None`` if the input is empty or detection fails at every stage.
+    Returns ``(None, 0.0)`` if the input is empty or detection fails.
     """
     if not text:
-        return None
+        return None, 0.0
 
     snippet = text[:2000]
 
@@ -70,7 +78,7 @@ def detect_language(text: str) -> str | None:
             logger.debug(
                 "Devanagari ratio %.2f ≥ threshold → classifying as 'hi'", ratio
             )
-            return "hi"
+            return "hi", ratio
 
     # ── Stage 2: Romanized Hinglish heuristic ────────────────────────────────
     tokens = [tok for tok in snippet.lower().split() if tok.isalpha()]
@@ -84,11 +92,27 @@ def detect_language(text: str) -> str | None:
                 hit_count,
                 len(tokens),
             )
-            return "hi-Latn"
+            return "hi-Latn", 0.75
+
+    # ── Stage 3: English word heuristic ──────────────────────────────────────
+    if tokens:
+        eng_count = sum(1 for tok in tokens if tok in _ENGLISH_WORDS)
+        eng_ratio = eng_count / len(tokens)
+        if eng_ratio >= 0.05:
+            logger.debug(
+                "English hit ratio %.2f (%d/%d tokens) → classifying as 'en'",
+                eng_ratio,
+                eng_count,
+                len(tokens),
+            )
+            return "en", 0.99
 
     # ── Stage 3: langdetect fallback ─────────────────────────────────────────
     try:
-        return detect(snippet)
+        lang = detect(snippet)
+        if lang:
+            return lang, 0.60
+        return None, 0.0
     except LangDetectException:
         logger.warning("langdetect failed to identify language for snippet.")
-        return None
+        return None, 0.0

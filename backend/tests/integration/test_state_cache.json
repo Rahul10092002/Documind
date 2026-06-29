@@ -1,0 +1,32 @@
+{
+  "document_id": "test-doc-1",
+  "file_path": "E:\\DocMind\\backend\\tests\\integration\\test_files\\credit_card.pdf",
+  "raw_bytes": "",
+  "raw_text": "",
+  "documents": [],
+  "is_scanned": false,
+  "char_count": 0,
+  "detected_language": "",
+  "detected_boilerplate": [],
+  "language_confidence": 0.0,
+  "prompt_locale": "english",
+  "ner_entities": {},
+  "llm_entities": {},
+  "merged_entities": {},
+  "risk_flags_raw": [],
+  "risk_flags_deduped": [],
+  "executive_summary": "",
+  "risk_analysis_partial": false,
+  "executive_summary_available": false,
+  "retrieved_chunks": [],
+  "rag_answer": "",
+  "confidence_score": 0.0,
+  "suggested_questions": [],
+  "draft_reply": "",
+  "current_step": "failed",
+  "errors": [
+    "PDF not found: E:\\DocMind\\backend\\tests\\integration\\test_files\\credit_card.pdf"
+  ],
+  "retry_count": 1,
+  "pipeline_type": "pdf"
+}

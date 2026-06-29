@@ -22,3 +22,7 @@ spacy
 transformers
 torch
 langgraph-checkpoint-sqlite
+tenacity>=8.2.0
+structlog>=23.0.0
+slowapi>=0.1.9
+alembic>=1.12.0

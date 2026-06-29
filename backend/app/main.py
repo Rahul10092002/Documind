@@ -22,15 +22,17 @@ from contextlib import asynccontextmanager
 
 from app.config import settings
 
-from fastapi import FastAPI, Depends, HTTPException
+from fastapi import FastAPI, Depends, HTTPException, Request
+from fastapi.responses import JSONResponse
 from fastapi.middleware.cors import CORSMiddleware
 from sqlalchemy.orm import Session
 from sqlalchemy import text
 
 from app.database import engine, get_db
+from app.exceptions import DocuMindBaseError
 import app.models as models  # noqa: F401 — registers all ORM classes with Base
-from app.routers import documents
-from app.utils import get_collection
+from app.routers import documents, extraction, reports, health
+from app.vectordb import get_collection
 
 logger = logging.getLogger(__name__)
 
@@ -75,12 +77,32 @@ async def lifespan(app: FastAPI):
         logger.error("Failed to initialize ChromaDB collection: %s", e)
         raise e
 
+    # Pre-load spaCy models at server startup to prevent per-request cold start (2-3s delay)
+    try:
+        logger.info("Pre-loading spaCy models (xx_ent_wiki_sm & en_core_web_lg) on server startup...")
+        from app.agents.extraction_agent import get_spacy_model
+        get_spacy_model("hindi")
+        get_spacy_model("english")
+        logger.info("spaCy models pre-loaded and cached successfully.")
+    except Exception as e:
+        logger.warning("Failed to pre-load spaCy models at server startup: %s", e)
+
     yield
     # Shutdown — nothing to clean up yet
 
 
 app = FastAPI(title="DocuMind API", lifespan=lifespan)
 main = app
+
+@app.exception_handler(DocuMindBaseError)
+async def documind_exception_handler(request: Request, exc: DocuMindBaseError):
+    return JSONResponse(
+        status_code=exc.status_code,
+        content={
+            "detail": exc.detail,
+            "error_type": type(exc).__name__,
+        },
+    )
 
 # ── CORS ──────────────────────────────────────────────────────────────────────
 # WARNING: allow_origins=["*"] combined with allow_credentials=True is invalid
@@ -94,17 +116,19 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
+from app.middleware.logging import logging_middleware
+app.middleware("http")(logging_middleware)
+
+from slowapi import Limiter, _rate_limit_exceeded_handler
+from slowapi.util import get_remote_address
+from slowapi.errors import RateLimitExceeded
+
+limiter = Limiter(key_func=get_remote_address)
+app.state.limiter = limiter
+app.add_exception_handler(RateLimitExceeded, _rate_limit_exceeded_handler)
+
 # ── Routers ───────────────────────────────────────────────────────────────────
 app.include_router(documents.router)
-
-
-# ── Health ────────────────────────────────────────────────────────────────────
-@app.get("/health")
-def health_check(db: Session = Depends(get_db)):
-    try:
-        db.execute(text("SELECT 1"))
-        logger.info("Database connection: OK")
-        return {"status": "ok", "message": "success"}
-    except Exception as e:
-        logger.error("Database connection FAILED: %s", e)
-        raise HTTPException(status_code=503, detail="Database unavailable")
+app.include_router(extraction.router)
+app.include_router(reports.router)
+app.include_router(health.router)

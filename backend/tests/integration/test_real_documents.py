@@ -3,13 +3,13 @@ import sys
 from pathlib import Path
 
 # Ensure the backend directory is in python path
-backend_dir = os.path.dirname(os.path.abspath(__file__))
+backend_dir = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 sys.path.append(backend_dir)
 
 from app.config import settings
 
-from app.utils.pdf_extraction import extract_text_from_pdf
-from app.utils.entity_extraction import run_full_entity_extraction
+from app.extractors.pdf_extraction import extract_text_from_pdf
+from app.extractors.entity_extraction import run_full_entity_extraction
 
 def test_real_doc(file_path: Path):
     print(f"\n==================================================================")

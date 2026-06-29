@@ -17,11 +17,11 @@ from langchain_core.documents import Document as LCDocument
 from app.config import settings
 from app.database import engine, SessionLocal
 from app.models import Document as DbDocument, ChatMessage, MessageRole
-from app.utils.llm_client import LLMClientInterface, default_llm_client
-from app.utils.vector_retriever import VectorStoreInterface, default_vector_retriever
-from app.utils.prompt_templates import get_qa_prompt, get_risk_analysis_prompt, get_rephrase_prompt, get_followup_questions_prompt
-from app.utils.vector_store import get_vector_store
-from app.utils.entity_extraction import clean_boilerplate
+from app.llm.llm_client import LLMClientInterface, default_llm_client
+from app.vectordb.vector_retriever import VectorStoreInterface, default_vector_retriever
+from app.llm.prompt_templates import get_qa_prompt, get_risk_analysis_prompt, get_rephrase_prompt, get_followup_questions_prompt
+from app.vectordb.vector_store import get_vector_store
+from app.extractors.entity_extraction import clean_boilerplate
 
 logger = logging.getLogger(__name__)
 
@@ -668,7 +668,7 @@ def generate_risk_and_draft(
     if not cleaned_text.strip():
         cleaned_text = text
 
-    from app.utils.text_chunking import split_text
+    from app.vectordb.text_chunking import split_text
     chunks = split_text(
         cleaned_text,
         chunk_size=12000,
@@ -775,7 +775,7 @@ async def agenerate_risk_and_draft(
     if not cleaned_text.strip():
         cleaned_text = text
 
-    from app.utils.text_chunking import split_text
+    from app.vectordb.text_chunking import split_text
     chunks = split_text(
         cleaned_text,
         chunk_size=12000,
