@@ -37,6 +37,9 @@ test_*.sqlite
 test_*.pdf
 test_*.docx
 test_*.txt
+documind_backend_refactor_guide.html
+*test_state*.json
+backend/test_state_cache.json
 
 # Exclude markdown files except README.md
 **/*.md
